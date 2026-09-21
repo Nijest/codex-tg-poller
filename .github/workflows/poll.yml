@@ -13,7 +13,9 @@ concurrency:
   group: poll-telegram
   cancel-in-progress: false
 
-permissions: {}
+# checkout needs contents:read — an empty block here fails the job outright
+permissions:
+  contents: read
 
 jobs:
   poll:
