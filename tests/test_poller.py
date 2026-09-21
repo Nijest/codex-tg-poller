@@ -90,6 +90,23 @@ def test_message_text_never_reaches_the_logs():
     assert secret not in output
 
 
+def test_unset_secret_fails_loudly():
+    """Actions passes a missing secret as "", which must not become a 401."""
+    saved = os.environ["RUNNER_DISPATCH_TOKEN"]
+    os.environ["RUNNER_DISPATCH_TOKEN"] = ""
+    acked = []
+    poller.telegram = lambda *a, **kw: acked.append(kw.get("offset")) or []
+    try:
+        poller.main()
+    except RuntimeError as exc:
+        assert "RUNNER_DISPATCH_TOKEN" in str(exc)
+    else:
+        raise AssertionError("an empty secret must stop the run, not 401 later")
+    finally:
+        os.environ["RUNNER_DISPATCH_TOKEN"] = saved
+    assert acked == [], "nothing may be touched when the poller is misconfigured"
+
+
 def test_message_text_never_leaks_through_an_error():
     secret = "KLIENTSKIY-PAROL-43"
     _, _, output = run([msg(30, OWNER, secret)], dispatch_fails_on=30)

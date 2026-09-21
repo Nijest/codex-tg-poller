@@ -53,9 +53,24 @@ def dispatch(repo, token, prompt, update_id):
 
 
 def main():
+    # Actions hands a missing secret over as an empty string, not as an unset
+    # variable, so an unconfigured repo would quietly 401 instead of saying why
+    missing = [
+        name
+        for name in (
+            "NOTIFY_BOT_TOKEN",
+            "NOTIFY_CHAT_ID",
+            "RUNNER_REPO",
+            "RUNNER_DISPATCH_TOKEN",
+        )
+        if not os.environ.get(name, "").strip()
+    ]
+    if missing:
+        raise RuntimeError(f"secrets not set: {', '.join(missing)}")
+
     bot_token = os.environ["NOTIFY_BOT_TOKEN"]
-    owner_chat = str(os.environ["NOTIFY_CHAT_ID"])
-    runner_repo = os.environ["RUNNER_REPO"]
+    owner_chat = str(os.environ["NOTIFY_CHAT_ID"]).strip()
+    runner_repo = os.environ["RUNNER_REPO"].strip()
     gh_token = os.environ["RUNNER_DISPATCH_TOKEN"]
 
     updates = telegram(bot_token, "getUpdates", timeout=0, allowed_updates=["message"])
