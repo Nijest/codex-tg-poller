@@ -1,0 +1,31 @@
+name: poll-telegram
+
+# This repo is public for one reason: Actions minutes are unlimited on public
+# repos, and a 5-minute cron would eat the whole private-repo free tier.
+# Nothing secret lives in the code — tokens come from Actions secrets, and the
+# poller never prints message text, because logs here are world-readable.
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: poll-telegram
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Poll and dispatch
+        env:
+          NOTIFY_BOT_TOKEN: ${{ secrets.NOTIFY_BOT_TOKEN }}
+          NOTIFY_CHAT_ID: ${{ secrets.NOTIFY_CHAT_ID }}
+          RUNNER_REPO: ${{ secrets.RUNNER_REPO }}
+          RUNNER_DISPATCH_TOKEN: ${{ secrets.RUNNER_DISPATCH_TOKEN }}
+        run: python3 poller.py
