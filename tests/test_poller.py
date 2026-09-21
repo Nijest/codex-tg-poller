@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
-"""Offline checks for poller.py: filtering, ack point, failure behaviour."""
+"""Checks for poller.py: chat filtering, ack point, and log hygiene.
+
+Runs under pytest, or standalone with `python3 tests/test_poller.py` so the
+workflow does not need pytest installed.
+"""
 
 import contextlib
 import importlib.util
 import io
-from pathlib import Path
 import os
 import sys
+from pathlib import Path
 
-os.environ.update(
-    NOTIFY_BOT_TOKEN="t",
-    NOTIFY_CHAT_ID="548958029",
-    RUNNER_REPO="Nijest/codex-runner",
-    RUNNER_DISPATCH_TOKEN="g",
-)
+os.environ.setdefault("NOTIFY_BOT_TOKEN", "t")
+os.environ.setdefault("NOTIFY_CHAT_ID", "548958029")
+os.environ.setdefault("RUNNER_REPO", "Nijest/codex-runner")
+os.environ.setdefault("RUNNER_DISPATCH_TOKEN", "g")
+
+OWNER = 548958029
 
 spec = importlib.util.spec_from_file_location(
     "poller", str(Path(__file__).resolve().parent.parent / "poller.py")
@@ -26,68 +30,85 @@ def msg(uid, chat, text):
     return {"update_id": uid, "message": {"text": text, "chat": {"id": chat}}}
 
 
-def run(updates, dispatch_fails_on=None):
+def run(updates, dispatch_fails_on=None, telegram_fails=False):
+    """Drive main() against fake transports. Returns (dispatched, acked, output)."""
     sent, acked = [], []
 
-    def fake_telegram(token, method, **p):
-        if "offset" in p:
-            acked.append(p["offset"])
+    def fake_telegram(token, method, **params):
+        if "offset" in params:
+            if telegram_fails:
+                raise RuntimeError("telegram down")
+            acked.append(params["offset"])
             return []
         return updates
 
     def fake_dispatch(repo, token, prompt, uid):
         if uid == dispatch_fails_on:
-            raise RuntimeError("boom")
+            raise RuntimeError("dispatch refused")
         sent.append((uid, prompt))
 
     poller.telegram, poller.dispatch = fake_telegram, fake_dispatch
-    try:
-        poller.main()
-    except RuntimeError:
-        pass
-    return sent, acked
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        try:
+            poller.main()
+        except RuntimeError:
+            pass
+    return sent, acked, buf.getvalue()
 
 
-fails = 0
+def test_only_owner_chat_is_executed():
+    sent, acked, _ = run([msg(1, 999, "hack"), msg(2, OWNER, "fix bug")])
+    assert sent == [(2, "fix bug")]
+    assert acked == [3], "ack must cover the ignored update too"
 
 
-def check(label, got, want):
-    global fails
-    ok = got == want
-    fails += 0 if ok else 1
-    print(
-        f"{'ok  ' if ok else 'FAIL'} {label}: {got!r}" + ("" if ok else f" != {want!r}")
+def test_blank_text_is_ignored_but_acked():
+    sent, acked, _ = run([msg(5, OWNER, "   ")])
+    assert sent == []
+    assert acked == [6]
+
+
+def test_failed_dispatch_is_not_acked():
+    sent, acked, _ = run(
+        [msg(10, OWNER, "a"), msg(11, OWNER, "b"), msg(12, OWNER, "c")],
+        dispatch_fails_on=11,
     )
+    assert sent == [(10, "a")], "work after the failure must not be dispatched"
+    assert acked == [11], "the broken update must come back next run"
 
 
-# 1. чужой чат отбрасывается, свой проходит
-sent, acked = run([msg(1, 999, "hack"), msg(2, 548958029, "fix bug")])
-check("только свой чат исполняется", sent, [(2, "fix bug")])
-check("подтверждено по последний", acked, [3])
+def test_empty_batch_acks_nothing():
+    _, acked, _ = run([])
+    assert acked == []
 
-# 2. пустой текст игнорируется, но подтверждается
-sent, acked = run([msg(5, 548958029, "   ")])
-check("пустое не исполняется", sent, [])
-check("пустое всё равно подтверждено", acked, [6])
 
-# 3. падение на середине: подтверждаем только по успешные
-sent, acked = run(
-    [msg(10, 548958029, "a"), msg(11, 548958029, "b"), msg(12, 548958029, "c")],
-    dispatch_fails_on=11,
-)
-check("до сбоя отправлено", sent, [(10, "a")])
-check("подтверждено по 10, сбойное вернётся", acked, [11])
+def test_message_text_never_reaches_the_logs():
+    """This repo is public, so its job logs are world-readable."""
+    secret = "KLIENTSKIY-PAROL-42"
+    _, _, output = run([msg(20, OWNER, secret), msg(21, 777, secret)])
+    assert secret not in output
 
-# 4. пустой список — ничего не подтверждаем
-sent, acked = run([])
-check("пусто — ack не шлём", acked, [])
 
-# 5. главное свойство этого репо: логи публичные, текст задач туда попасть не должен
-SECRET = "KLIENTSKIY-PAROL-42"
-buf = io.StringIO()
-with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-    run([msg(20, 548958029, SECRET), msg(21, 777, SECRET)])
-check("текст сообщения не утёк в вывод", SECRET in buf.getvalue(), False)
+def test_message_text_never_leaks_through_an_error():
+    secret = "KLIENTSKIY-PAROL-43"
+    _, _, output = run([msg(30, OWNER, secret)], dispatch_fails_on=30)
+    assert secret not in output
 
-print("\nПРОВАЛОВ:", fails)
-sys.exit(1 if fails else 0)
+    _, _, output = run([msg(31, OWNER, secret)], telegram_fails=True)
+    assert secret not in output
+
+
+if __name__ == "__main__":
+    failed = 0
+    for name, fn in sorted(globals().items()):
+        if not name.startswith("test_") or not callable(fn):
+            continue
+        try:
+            fn()
+            print(f"ok    {name}")
+        except AssertionError as exc:
+            failed += 1
+            print(f"FAIL  {name}: {exc}")
+    print(f"\nпровалов: {failed}")
+    sys.exit(1 if failed else 0)
